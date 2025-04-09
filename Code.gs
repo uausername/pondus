@@ -2,7 +2,7 @@
  * ID вашей Google Таблицы. Замените 'YOUR_SHEET_ID' на реальный ID.
  * Его можно найти в URL таблицы: https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit
  */
-var SPREADSHEET_ID = '1S-RoaJC_yi5o69Pg0nNjFqCZcZHoHG-_A5CkgBJBcZo'; 
+var SPREADSHEET_ID = 'YOUR_SHEET_ID'; 
 
 /**
  * Имя листа в таблице, куда будут записываться данные.
