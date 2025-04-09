@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Сканер Продуктов</title>
+    <style>
+        /* Простые стили для удобства */
+        body { font-family: sans-serif; padding: 1em; }
+        video { max-width: 100%; border: 1px solid #ccc; margin-bottom: 1em; }
+        #controls, #output { margin-top: 1em; }
+        button { padding: 0.8em 1.2em; font-size: 1em; margin-right: 0.5em; }
+        input { padding: 0.5em; margin-right: 0.5em; }
+        #status { color: green; font-weight: bold; }
+        #error { color: red; font-weight: bold; }
+        #video-container {
+            position: relative; /* Для позиционирования оверлея */
+            display: inline-block; /* Чтобы контейнер облегал видео */
+        }
+        #roi-overlay {
+            position: absolute;
+            border: 3px solid red;
+            /* Размеры и положение рамки (можно настроить) */
+            /* Пример: рамка 50% ширины и 20% высоты, по центру */
+            width: 50%;
+            height: 20%;
+            left: 25%; /* (100% - 50%) / 2 */
+            top: 40%;  /* (100% - 20%) / 2 */
+            box-sizing: border-box; /* Чтобы border не увеличивал размер */
+            pointer-events: none; /* Чтобы не мешала кликам */
+        }
+    </style>
+</head>
+<body>
+    <h1>Сканер Продуктов</h1>
+
+    <div id="video-container"> <!-- Обертка для видео и оверлея -->
+        <video id="video" autoplay playsinline></video>
+        <div id="roi-overlay"></div> <!-- Рамка для фокусировки -->
+    </div>
+    <canvas id="canvas" style="display:none;"></canvas> <!-- Скрытый canvas для захвата кадра -->
+
+    <div id="controls">
+        <button id="start-camera">Включить камеру</button>
+        <hr>
+        <label for="product-name">Продукт:</label>
+        <input type="text" id="product-name" placeholder="Название вручную">
+        <label for="product-weight">Вес:</label>
+        <input type="text" id="product-weight" placeholder="Вес вручную (напр. 0.123)">
+        <button id="recognize-product">Распознать продукт</button>
+        <button id="recognize-weight">Распознать вес</button>
+        <button id="send-data">Отправить данные</button>
+    </div>
+
+    <div id="output">
+        <p id="status"></p>
+        <p id="error"></p>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas'); // Нужен для захвата кадра
+        const ctx = canvas.getContext('2d'); // Контекст для рисования на canvas
+        const startCameraButton = document.getElementById('start-camera');
+        const recognizeProductButton = document.getElementById('recognize-product');
+        const recognizeWeightButton = document.getElementById('recognize-weight');
+        const sendDataButton = document.getElementById('send-data');
+        const productNameInput = document.getElementById('product-name');
+        const productWeightInput = document.getElementById('product-weight');
+        const statusElement = document.getElementById('status');
+        const errorElement = document.getElementById('error');
+
+        // URL вашего Google Apps Script API
+        const API_URL = 'https://script.google.com/macros/s/AKfycbzgWs9udTgB3IcAuTTfNlRNXHW73ZjYXUiNXgyWMZ1rnx7xHu-1yx_ff2fUCY3-bw8xtg/exec';
+
+        let stream; // Переменная для хранения потока с камеры
+        let cocoSsdModel = null; // Переменная для хранения загруженной модели COCO-SSD
+
+        // --- Функции ---
+
+        // Функция для загрузки модели COCO-SSD
+        async function loadCocoSsdModel() {
+            statusElement.textContent = 'Загрузка модели распознавания объектов...';
+            errorElement.textContent = ''; // Очищаем ошибки перед попыткой
+            try {
+                // Добавим проверку и лог перед вызовом
+                console.log('Проверка перед загрузкой COCO-SSD. typeof cocoSsd:', typeof cocoSsd);
+                if (typeof cocoSsd === 'undefined') {
+                    throw new ReferenceError('Объект cocoSsd не определен. Библиотека не загрузилась?');
+                }
+                cocoSsdModel = await cocoSsd.load();
+                statusElement.textContent = 'Модель распознавания объектов загружена.';
+                console.log('Модель COCO-SSD загружена.');
+                recognizeProductButton.disabled = false; // Включаем кнопку после загрузки
+            } catch (err) {
+                errorElement.textContent = 'Ошибка загрузки модели COCO-SSD: ' + err;
+                console.error("Ошибка загрузки COCO-SSD:", err);
+                statusElement.textContent = '';
+            }
+        }
+
+        // Запрос доступа к камере и запуск видео
+        async function startCamera() {
+            statusElement.textContent = '';
+            errorElement.textContent = '';
+            try {
+                if (stream) { // Если поток уже есть, остановим его
+                    stream.getTracks().forEach(track => track.stop());
+                }
+                // Запрашиваем доступ к задней камере, если возможно
+                const constraints = {
+                    video: {
+                        facingMode: 'environment' // Предпочтительно задняя камера
+                    }
+                };
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                video.play(); // Начинаем воспроизведение
+                statusElement.textContent = 'Камера включена.';
+                console.log("Камера запущена");
+            } catch (err) {
+                errorElement.textContent = 'Ошибка доступа к камере: ' + err.name + ' - ' + err.message;
+                console.error("Ошибка доступа к камере:", err);
+                // Если задняя камера недоступна, пробуем любую
+                try {
+                    console.log("Пробуем любую камеру...");
+                    const anyConstraints = { video: true };
+                    stream = await navigator.mediaDevices.getUserMedia(anyConstraints);
+                    video.srcObject = stream;
+                    video.play();
+                     // Установим размер canvas равным размеру видео после его загрузки
+                     video.addEventListener('loadedmetadata', () => {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        console.log(`Canvas size set to: ${canvas.width}x${canvas.height}`);
+                     });
+                     statusElement.textContent = 'Камера включена (фронтальная?).';
+                     errorElement.textContent = ''; // Убираем предыдущую ошибку
+                     console.log("Камера запущена (любая)");
+                } catch (anyErr) {
+                     errorElement.textContent = 'Ошибка доступа к камере: ' + anyErr.name + ' - ' + anyErr.message;
+                     console.error("Ошибка доступа к любой камере:", anyErr);
+                }
+            }
+        }
+
+        // Функция захвата кадра с видео на canvas (только ROI)
+        function captureFrame() {
+            if (!stream || !video.videoWidth) {
+                errorElement.textContent = 'Камера не включена или видео не загружено.';
+                return null;
+            }
+
+            // Получаем размеры и положение ROI относительно видео
+            const videoRect = video.getBoundingClientRect(); // Размеры видео на экране
+            const overlay = document.getElementById('roi-overlay');
+            const overlayRect = overlay.getBoundingClientRect();
+
+            // Вычисляем координаты ROI на оригинальном видео (с учетом масштабирования)
+            const scaleX = video.videoWidth / videoRect.width;
+            const scaleY = video.videoHeight / videoRect.height;
+
+            const roiX = (overlayRect.left - videoRect.left) * scaleX;
+            const roiY = (overlayRect.top - videoRect.top) * scaleY;
+            const roiWidth = overlayRect.width * scaleX;
+            const roiHeight = overlayRect.height * scaleY;
+
+            // Устанавливаем размер canvas равным размеру ROI
+            canvas.width = roiWidth;
+            canvas.height = roiHeight;
+
+            // Копируем только область ROI из видео в canvas
+            ctx.drawImage(video, roiX, roiY, roiWidth, roiHeight, 0, 0, canvas.width, canvas.height);
+            console.log(`Захвачена область ROI: x=${roiX.toFixed(0)}, y=${roiY.toFixed(0)}, w=${roiWidth.toFixed(0)}, h=${roiHeight.toFixed(0)}`);
+            return canvas;
+        }
+
+        // Функция распознавания веса с помощью Tesseract.js
+        async function recognizeWeight() {
+            statusElement.textContent = 'Распознавание веса...';
+            errorElement.textContent = '';
+
+            const capturedCanvas = captureFrame();
+            if (!capturedCanvas) return;
+
+            // --- Начало: Преобразование в оттенки серого ---
+            const imageData = ctx.getImageData(0, 0, capturedCanvas.width, capturedCanvas.height);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                data[i]     = avg; // red
+                data[i + 1] = avg; // green
+                data[i + 2] = avg; // blue
+            }
+            ctx.putImageData(imageData, 0, 0);
+            console.log('Изображение преобразовано в оттенки серого.');
+            // --- Конец: Преобразование в оттенки серого ---
+
+            try {
+                const worker = await Tesseract.createWorker('eng+rus', 1, {
+                    // logger: m => console.log(m) // Раскомментируйте для подробного лога
+                });
+                // Ограничиваем символы цифрами, точкой и запятой
+                await worker.setParameters({
+                    tessedit_char_whitelist: '0123456789.,'
+                });
+
+                const { data: { text } } = await worker.recognize(capturedCanvas);
+                console.log('Распознанный текст:', text);
+                statusElement.textContent = 'Текст распознан: ' + text;
+
+                // Улучшенная логика извлечения веса
+                let extractedWeight = null;
+                // Ищем числа с десятичной точкой или запятой (e.g., 1.23, 0,45, 123)
+                // \b - граница слова
+                // \d+ - одна или более цифр (целая часть)
+                // (?:[.,]\d+)? - необязательная группа: точка/запятая и еще цифры (дробная часть)
+                // \b - граница слова
+                const regex = /\b\d+(?:[.,]\d+)?\b/g;
+                const matches = text.match(regex); // Находим все совпадения
+
+                if (matches && matches.length > 0) {
+                    console.log('Найденные совпадения:', matches);
+                    // Берем первое найденное совпадение (можно усложнить логику выбора)
+                    let bestMatch = matches[0]; 
+                    
+                    // Заменяем запятую на точку и пытаемся преобразовать в число
+                    const weightString = bestMatch.replace(',', '.');
+                    const potentialWeight = parseFloat(weightString);
+
+                    if (!isNaN(potentialWeight)) {
+                        extractedWeight = potentialWeight;
+                    } else {
+                        console.warn('Не удалось преобразовать найденное совпадение в число:', bestMatch);
+                    }
+                } else {
+                    console.warn('Числовые значения не найдены в тексте:', text);
+                }
+
+                if (extractedWeight !== null) {
+                    productWeightInput.value = extractedWeight; // Вставляем в поле ввода
+                    statusElement.textContent = 'Вес распознан и вставлен.';
+                } else {
+                    errorElement.textContent = 'Не удалось извлечь число из текста: ' + text;
+                }
+
+                await worker.terminate(); // Освобождаем ресурсы
+            } catch (err) {
+                errorElement.textContent = 'Ошибка распознавания: ' + err;
+                console.error("Ошибка Tesseract:", err);
+                statusElement.textContent = ''; // Убираем "Распознавание..."
+            }
+        }
+
+        // Функция распознавания продукта с помощью COCO-SSD
+        async function recognizeProduct() {
+            if (!cocoSsdModel) {
+                errorElement.textContent = 'Модель COCO-SSD еще не загружена.';
+                return;
+            }
+            if (!stream || !video.videoWidth) {
+                errorElement.textContent = 'Камера не включена.';
+                return;
+            }
+
+            statusElement.textContent = 'Распознавание продукта...';
+            errorElement.textContent = '';
+
+            try {
+                // Используем видео напрямую, модель умеет с ним работать
+                const predictions = await cocoSsdModel.detect(video);
+
+                console.log('Результаты распознавания:', predictions);
+
+                if (predictions.length > 0) {
+                    // Найдем предсказание с наибольшей уверенностью
+                    let bestPrediction = predictions[0];
+                    for (let i = 1; i < predictions.length; i++) {
+                        if (predictions[i].score > bestPrediction.score) {
+                            bestPrediction = predictions[i];
+                        }
+                    }
+
+                    const productName = bestPrediction.class;
+                    const confidence = (bestPrediction.score * 100).toFixed(1);
+                    productNameInput.value = productName; // Вставляем название в поле
+                    statusElement.textContent = `Распознан: ${productName} (${confidence}%)`;
+                } else {
+                    statusElement.textContent = 'Продукты не распознаны.';
+                }
+
+            } catch (err) {
+                errorElement.textContent = 'Ошибка распознавания продукта: ' + err;
+                console.error("Ошибка детекции COCO-SSD:", err);
+                statusElement.textContent = '';
+            }
+        }
+
+        // Отправка данных в Google Apps Script
+        async function sendDataToSheet(name, weight) {
+            statusElement.textContent = 'Отправка данных...';
+            errorElement.textContent = '';
+
+            // Используем FormData для правильной кодировки
+            const formData = new URLSearchParams();
+            formData.append('name', name);
+            formData.append('weight', weight);
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    mode: 'no-cors', // Важно для Apps Script при простом POST без preflight
+                                   // Сервер Apps Script сам обработает это, но мы не получим
+                                   // детальный ответ в JS из-за CORS ограничений.
+                                   // Если нужен ответ, нужно настроить CORS или использовать JSONP.
+                                   // Но для простой записи данных 'no-cors' достаточно.
+                    // Если mode: 'no-cors' не сработает, попробуйте убрать и посмотрите на ошибки CORS в консоли
+                    headers: {
+                        // 'Content-Type': 'application/x-www-form-urlencoded', // Устанавливается автоматически для URLSearchParams
+                    },
+                    body: formData
+                });
+
+                // При mode: 'no-cors' мы не можем прочитать ответ, так что просто считаем успешным, если нет ошибки сети
+                statusElement.textContent = 'Данные (' + name + ', ' + weight + ') отправлены (проверьте таблицу).';
+                console.log('Запрос отправлен.');
+                 // Очищаем поля после успешной отправки
+                productNameInput.value = '';
+                productWeightInput.value = '';
+
+            } catch (err) {
+                errorElement.textContent = 'Ошибка отправки данных: ' + err;
+                console.error("Ошибка отправки:", err);
+            }
+        }
+
+        // --- Обработчики событий ---
+
+        startCameraButton.addEventListener('click', startCamera);
+        recognizeProductButton.addEventListener('click', recognizeProduct);
+        recognizeWeightButton.addEventListener('click', recognizeWeight);
+        sendDataButton.addEventListener('click', () => {
+            const name = productNameInput.value.trim();
+            const weight = productWeightInput.value.trim();
+
+            if (name && weight) {
+                sendDataToSheet(name, weight);
+            } else {
+                errorElement.textContent = 'Пожалуйста, введите название и вес.';
+            }
+        });
+
+        // Остановка камеры при закрытии страницы/вкладки (хорошая практика)
+        window.addEventListener('beforeunload', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+        });
+
+        // --- Инициализация при загрузке --- 
+        // Ждем, пока весь HTML будет загружен и обработан
+        document.addEventListener('DOMContentLoaded', (event) => {
+            console.log('DOM полностью загружен и разобран');
+            recognizeProductButton.disabled = true; // Выключаем кнопку, пока модель не загрузится
+            loadCocoSsdModel(); // Начинаем загрузку модели после загрузки DOM
+        });
+
+    </script>
+
+    <!-- Перемещено сюда, перед основным скриптом -->
+    <script src='https://unpkg.com/tesseract.js@5/dist/tesseract.min.js'></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@latest/dist/coco-ssd.min.js"></script>
+
+</body>
+</html>
